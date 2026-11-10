@@ -35,7 +35,7 @@ data class StreamConfig(
     val url: String
         get() = when (target) {
             Target.YOUTUBE -> ytServer.trimEnd('/') + "/" + ytKey.trim()
-            Target.PC -> "srt://${pcIp.trim()}:$pcPort"
+            Target.PC -> "srt://${pcIp.trim()}:$pcPort/live"
         }
 
     /** По локальной сети можно лить с битрейтом выше — картинка чище. */
