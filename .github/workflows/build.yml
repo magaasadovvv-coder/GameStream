@@ -25,8 +25,9 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pyinstaller
-      - run: pyinstaller --onefile --windowed --name GameStreamPC pc/gamestream_pc.py
+      # Папка вместо одного exe: такие сборки антивирусы не путают с вирусами
+      - run: pyinstaller --onedir --windowed --noupx --name GameStreamPC pc/gamestream_pc.py
       - uses: actions/upload-artifact@v4
         with:
-          name: GameStream-PC-exe
-          path: dist/GameStreamPC.exe
+          name: GameStream-PC
+          path: dist/GameStreamPC/
