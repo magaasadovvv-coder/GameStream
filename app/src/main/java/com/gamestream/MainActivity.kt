@@ -70,6 +70,31 @@ class MainActivity : Activity() {
         })
         root.addView(hint("Стрим игр без водяных знаков — на YouTube или на ПК в OBS"))
 
+        // Если в прошлый раз был сбой — показываем причину, чтобы её можно было отправить
+        App.lastCrash(this)?.let { crash ->
+            val box = section()
+            box.addView(label("⚠ В прошлый раз произошёл сбой"))
+            box.addView(hint(crash.take(1200)).apply { setTextIsSelectable(true) })
+            box.addView(Button(this).apply {
+                text = "Скопировать ошибку"
+                isAllCaps = false
+                setOnClickListener {
+                    val cm = getSystemService(android.content.ClipboardManager::class.java)
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("GameStream", crash))
+                    toast("Скопировано — вставь в чат")
+                }
+            })
+            box.addView(Button(this).apply {
+                text = "Скрыть"
+                isAllCaps = false
+                setOnClickListener {
+                    App.clearCrash(this@MainActivity)
+                    box.visibility = View.GONE
+                }
+            })
+            root.addView(box)
+        }
+
         // --- Куда стримить ---
         root.addView(header("Куда стримить"))
         root.addView(radioGroup(
@@ -193,7 +218,8 @@ class MainActivity : Activity() {
         cfg.save(this)
 
         val needed = mutableListOf<String>()
-        if (cfg.usesMic || Build.VERSION.SDK_INT < 29) needed += Manifest.permission.RECORD_AUDIO
+        // Нужно всегда: Android требует это разрешение даже для записи звука игры
+        needed += Manifest.permission.RECORD_AUDIO
         if (Build.VERSION.SDK_INT >= 33) needed += Manifest.permission.POST_NOTIFICATIONS
         val missing = needed.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) {
@@ -208,7 +234,7 @@ class MainActivity : Activity() {
         if (requestCode != reqPerms) return
         val micIndex = permissions.indexOf(Manifest.permission.RECORD_AUDIO)
         if (micIndex >= 0 && grantResults[micIndex] != PackageManager.PERMISSION_GRANTED) {
-            return toast("Без доступа к микрофону выбери звук «Только звук игры»")
+            return toast("Разрешение «Микрофон» обязательно: без него Android не даёт записывать даже звук игры")
         }
         askScreenCapture()
     }

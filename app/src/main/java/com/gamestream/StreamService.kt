@@ -93,6 +93,16 @@ class StreamService : Service(), ConnectChecker {
         url = intent.getStringExtra("url") ?: ""
         toPc = intent.getStringExtra("target") == Target.PC.name
 
+        try {
+            startStreaming(intent)
+        } catch (e: Throwable) {
+            App.saveCrash(this, e)
+            fail("Ошибка запуска: ${e.message ?: e.javaClass.simpleName}")
+        }
+        return START_NOT_STICKY
+    }
+
+    private fun startStreaming(intent: Intent) {
         // На Android 14+ foreground-сервис обязан стартовать ДО получения MediaProjection
         startInForeground()
 
@@ -105,7 +115,7 @@ class StreamService : Service(), ConnectChecker {
         val p = data?.let { mpm.getMediaProjection(code, it) }
         if (p == null) {
             fail("Нет доступа к записи экрана")
-            return START_NOT_STICKY
+            return
         }
         p.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() { stopSelf() }
@@ -122,17 +132,22 @@ class StreamService : Service(), ConnectChecker {
         val audioOk = s.prepareAudio(48000, true, 160_000)
         if (!videoOk || !audioOk) {
             s.release()
-            fail("Телефон не поддерживает выбранное качество — выбери ниже")
-            return START_NOT_STICKY
+            fail(
+                if (!videoOk) "Телефон не поддерживает выбранное качество — выбери ниже"
+                else "Не удалось включить запись звука — проверь разрешение «Микрофон»"
+            )
+            return
         }
         s.changeVideoSource(ScreenSource(applicationContext, p))
         s.getStreamClient().setReTries(10)
         stream = s
 
+        // Экран отдаёт кадры только при изменениях — заставляем слать их постоянно
+        runCatching { s.getGlInterface().setForceRender(true, 15) }
+
         addBubble()
         s.startStream(url)
         tick()
-        return START_NOT_STICKY
     }
 
     // ---------- Звук ----------
