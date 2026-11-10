@@ -17,6 +17,23 @@ jobs:
         with:
           name: GameStream-phone-apk
           path: app/build/outputs/apk/debug/*.apk
+  translator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+      - run: gradle assembleDebug
+        working-directory: translator
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScreenTranslator-apk
+          path: translator/app/build/outputs/apk/debug/*.apk
   windows:
     runs-on: windows-latest
     steps:
