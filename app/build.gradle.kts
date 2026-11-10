@@ -11,8 +11,20 @@ android {
         applicationId = "com.gamestream"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        // Номер версии растёт с каждой сборкой на GitHub
+        val build = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
+        versionCode = build
+        versionName = "1.$build"
+    }
+
+    // Постоянный ключ подписи: новые версии ставятся поверх старой, без удаления
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {

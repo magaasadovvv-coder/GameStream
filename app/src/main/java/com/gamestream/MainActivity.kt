@@ -39,6 +39,12 @@ class MainActivity : Activity() {
     private var vertical = false
     private var audio = AudioMode.GAME_AND_MIC
     private var pcPort = 9000
+    private var privacy = false
+    private var gamePkg = ""
+    private lateinit var privacyBox: LinearLayout
+    private lateinit var gameBtn: Button
+    private lateinit var usageBtn: Button
+    private lateinit var notifBtn: Button
 
     private lateinit var ytBlock: LinearLayout
     private lateinit var pcBlock: LinearLayout
@@ -57,6 +63,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         val cfg = StreamConfig.load(this)
         target = cfg.target; quality = cfg.quality; vertical = cfg.vertical; audio = cfg.audio; pcPort = cfg.pcPort
+        privacy = cfg.privacy; gamePkg = cfg.gamePkg
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -69,6 +76,7 @@ class MainActivity : Activity() {
             setTextColor(accent)
         })
         root.addView(hint("Стрим игр без водяных знаков — на YouTube или на ПК в OBS"))
+        root.addView(hint("Версия " + (runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull() ?: "?")))
 
         // Если в прошлый раз был сбой — показываем причину, чтобы её можно было отправить
         App.lastCrash(this)?.let { crash ->
@@ -152,6 +160,36 @@ class MainActivity : Activity() {
         )
         root.addView(audioHint)
 
+        // --- Приватность ---
+        root.addView(header("Приватность"))
+        root.addView(android.widget.CheckBox(this).apply {
+            text = "Авто-скрытие личного"
+            textSize = 15f
+            setTextColor(textMain)
+            isChecked = privacy
+            setOnCheckedChangeListener { _, on -> privacy = on; refresh() }
+        })
+        root.addView(hint("Зрители видят заставку «Скоро вернусь» вместо экрана, когда ты выходишь из игры или всплывает уведомление. Звук продолжает идти."))
+        privacyBox = section().apply {
+            gameBtn = Button(this@MainActivity).apply {
+                isAllCaps = false
+                setOnClickListener { pickGame() }
+            }
+            addView(gameBtn)
+            usageBtn = Button(this@MainActivity).apply {
+                isAllCaps = false
+                setOnClickListener { openSettings(Settings.ACTION_USAGE_ACCESS_SETTINGS) }
+            }
+            addView(usageBtn)
+            notifBtn = Button(this@MainActivity).apply {
+                isAllCaps = false
+                setOnClickListener { openSettings(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS) }
+            }
+            addView(notifBtn)
+            addView(hint("В открывшемся списке найди GameStream и включи. Если переключатель серый: Настройки → Приложения → GameStream → ⋮ → «Разрешить ограниченные настройки»."))
+        }
+        root.addView(privacyBox)
+
         // --- Кнопки ---
         overlayBtn = Button(this).apply {
             text = "Разрешить кнопку поверх игр"
@@ -191,6 +229,11 @@ class MainActivity : Activity() {
         pcBlock.visibility = if (target == Target.PC) View.VISIBLE else View.GONE
         overlayBtn.visibility = if (Settings.canDrawOverlays(this)) View.GONE else View.VISIBLE
         startBtn.text = if (StreamService.isRunning) "■  Завершить стрим" else "●  Начать стрим"
+
+        privacyBox.visibility = if (privacy) View.VISIBLE else View.GONE
+        gameBtn.text = if (gamePkg.isEmpty()) "🎮 Выбрать игру" else "🎮 Игра: ${appName(gamePkg)}"
+        usageBtn.text = (if (Access.hasUsageAccess(this)) "✓ " else "① ") + "Скрывать экран вне игры"
+        notifBtn.text = (if (Access.hasNotificationAccess(this)) "✓ " else "② ") + "Скрывать уведомления"
     }
 
     private fun currentConfig() = StreamConfig(
@@ -199,6 +242,8 @@ class MainActivity : Activity() {
         ytKey = keyField.text.toString().trim(),
         pcIp = ipField.text.toString().trim(),
         pcPort = pcPort,
+        privacy = privacy,
+        gamePkg = gamePkg,
         quality = quality,
         vertical = vertical,
         audio = audio,
@@ -215,6 +260,13 @@ class MainActivity : Activity() {
         val cfg = currentConfig()
         if (cfg.target == Target.YOUTUBE && cfg.ytKey.isEmpty()) return toast("Вставь ключ трансляции YouTube")
         if (cfg.target == Target.PC && cfg.pcIp.isEmpty()) return toast("Найди ПК или впиши его IP")
+        if (cfg.privacy) {
+            val usage = Access.hasUsageAccess(this)
+            if (usage && cfg.gamePkg.isEmpty()) return toast("Выбери игру для авто-скрытия")
+            if (!usage && !Access.hasNotificationAccess(this)) {
+                return toast("Для авто-скрытия включи хотя бы одно из двух разрешений в разделе «Приватность»")
+            }
+        }
         cfg.save(this)
 
         val needed = mutableListOf<String>()
@@ -257,6 +309,34 @@ class MainActivity : Activity() {
         startForegroundService(intent)
         toast("Подключаюсь… Открывай игру!")
         moveTaskToBack(true)
+    }
+
+    // ---------- Приватность ----------
+
+    private fun openSettings(action: String) {
+        runCatching { startActivity(Intent(action)) }
+            .onFailure { toast("Не удалось открыть настройки — найди этот пункт вручную в «Специальный доступ»") }
+    }
+
+    private fun appName(pkg: String): String = runCatching {
+        packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+    }.getOrDefault(pkg)
+
+    private fun pickGame() {
+        val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val apps = packageManager.queryIntentActivities(launcher, 0)
+            .map { it.activityInfo.packageName to it.loadLabel(packageManager).toString() }
+            .filter { it.first != packageName }
+            .distinctBy { it.first }
+            .sortedBy { it.second.lowercase() }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Какую игру показывать зрителям?")
+            .setItems(apps.map { it.second }.toTypedArray()) { _, i ->
+                gamePkg = apps[i].first
+                currentConfig().save(this)
+                refresh()
+            }
+            .show()
     }
 
     // ---------- Поиск ПК ----------

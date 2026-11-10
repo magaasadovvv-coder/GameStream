@@ -6,9 +6,15 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.media.projection.MediaProjection
@@ -24,6 +30,7 @@ import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
 import com.pedro.common.ConnectChecker
+import com.pedro.encoder.input.gl.render.filters.`object`.ImageObjectFilterRender
 import com.pedro.encoder.input.sources.audio.AudioSource
 import com.pedro.encoder.input.sources.audio.InternalAudioSource
 import com.pedro.encoder.input.sources.audio.MicrophoneSource
@@ -32,6 +39,8 @@ import com.pedro.encoder.input.sources.video.NoVideoSource
 import com.pedro.encoder.input.sources.video.ScreenSource
 import com.pedro.library.generic.GenericStream
 import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Фоновый сервис стрима. Захватывает экран + звук и отправляет:
@@ -41,6 +50,8 @@ import kotlin.math.abs
  * Плавающая кнопка во время игры:
  *  • тап — выключить/включить микрофон
  *  • долгое нажатие — завершить стрим
+ *
+ * Значки на кнопке: ↓ — качество снижено из-за сети, 🔒 — экран скрыт от зрителей.
  *  • перетаскивание — подвинуть
  */
 class StreamService : Service(), ConnectChecker {
@@ -52,6 +63,11 @@ class StreamService : Service(), ConnectChecker {
         private const val CHANNEL_ID = "stream"
         private const val NOTIF_ID = 7
         @Volatile var isRunning = false
+        /** Запущенный сервис — чтобы NotifWatcher мог сообщить об уведомлении. */
+        @Volatile var instance: StreamService? = null
+
+        private const val NOTIF_COVER_MS = 6000L
+        private const val FOREGROUND_POLL_MS = 400L
     }
 
     private enum class State { CONNECTING, LIVE, RECONNECTING }
@@ -70,6 +86,21 @@ class StreamService : Service(), ConnectChecker {
     private var liveSince = 0L
     private var kbps = 0L
 
+    // Автоподстройка битрейта
+    private var maxBitrate = 0
+    private var curBitrate = 0
+    private var calmSeconds = 0
+
+    // Авто-скрытие личного
+    private var privacy = false
+    private var gamePkg = ""
+    private var trackGame = false
+    private var awayFromGame = false
+    private var notifUntil = 0L
+    private var lastEventTs = 0L
+    private var covered = false
+    private var coverBitmap: Bitmap? = null
+
     private var bubble: TextView? = null
     private var bubbleBg: GradientDrawable? = null
 
@@ -79,6 +110,7 @@ class StreamService : Service(), ConnectChecker {
         super.onCreate()
         windowManager = getSystemService(WindowManager::class.java)
         isRunning = true
+        instance = this
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -92,6 +124,8 @@ class StreamService : Service(), ConnectChecker {
             .getOrDefault(AudioMode.MIC)
         url = intent.getStringExtra("url") ?: ""
         toPc = intent.getStringExtra("target") == Target.PC.name
+        privacy = intent.getBooleanExtra("privacy", false)
+        gamePkg = intent.getStringExtra("game") ?: ""
 
         try {
             startStreaming(intent)
@@ -141,13 +175,119 @@ class StreamService : Service(), ConnectChecker {
         s.changeVideoSource(ScreenSource(applicationContext, p))
         s.getStreamClient().setReTries(10)
         stream = s
+        maxBitrate = bitrate
+        curBitrate = bitrate
+        coverBitmap = makeCover(w, h)
 
         // Экран отдаёт кадры только при изменениях — заставляем слать их постоянно
         runCatching { s.getGlInterface().setForceRender(true, 15) }
 
         addBubble()
         s.startStream(url)
+        startPrivacy()
         tick()
+    }
+
+    // ---------- Авто-скрытие личного ----------
+
+    private fun startPrivacy() {
+        if (!privacy) return
+        // Следить за тем, какая игра открыта, можно только с доступом к истории использования
+        trackGame = gamePkg.isNotEmpty() && Access.hasUsageAccess(this)
+        if (trackGame) {
+            awayFromGame = true          // закрыто, пока не откроется игра
+            lastEventTs = System.currentTimeMillis()
+            pollForeground()
+        }
+        updateCover()
+    }
+
+    private fun pollForeground() {
+        if (stream == null) return
+        runCatching {
+            val usm = getSystemService(UsageStatsManager::class.java)
+            val events = usm.queryEvents(lastEventTs, System.currentTimeMillis() + 1000)
+            val e = UsageEvents.Event()
+            while (events.hasNextEvent()) {
+                events.getNextEvent(e)
+                if (e.timeStamp > lastEventTs && e.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
+                    lastEventTs = e.timeStamp
+                    awayFromGame = e.packageName != gamePkg
+                }
+            }
+        }
+        updateCover()
+        main.postDelayed(::pollForeground, FOREGROUND_POLL_MS)
+    }
+
+    /** Вызывает NotifWatcher, когда поверх экрана всплывает уведомление. */
+    fun onPrivateNotification(fromPackage: String) {
+        main.post {
+            if (!privacy || stream == null || fromPackage == gamePkg) return@post
+            notifUntil = SystemClock.elapsedRealtime() + NOTIF_COVER_MS
+            updateCover()
+            main.postDelayed(::updateCover, NOTIF_COVER_MS + 100)
+        }
+    }
+
+    private fun updateCover() {
+        val s = stream ?: return
+        val want = privacy && (awayFromGame || SystemClock.elapsedRealtime() < notifUntil)
+        if (want == covered) return
+        covered = want
+        runCatching {
+            val gl = s.getGlInterface()
+            if (want) {
+                val filter = ImageObjectFilterRender()
+                gl.setFilter(filter)
+                filter.setImage(coverBitmap)
+                filter.setScale(100f, 100f)
+            } else {
+                gl.clearFilters()
+            }
+        }
+        render()
+    }
+
+    private fun makeCover(w: Int, h: Int): Bitmap {
+        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        canvas.drawColor(Color.rgb(16, 16, 22))
+        val side = min(w, h).toFloat()
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textAlign = Paint.Align.CENTER
+            textSize = side / 9f
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        canvas.drawText("Скоро вернусь", w / 2f, h / 2f, paint)
+        paint.textSize = side / 22f
+        paint.typeface = Typeface.DEFAULT
+        paint.color = Color.rgb(160, 160, 175)
+        canvas.drawText("Экран временно скрыт", w / 2f, h / 2f + side / 8f, paint)
+        return bitmap
+    }
+
+    // ---------- Автоподстройка битрейта ----------
+
+    /** Раз в секунду: сеть не успевает — снижаем качество, наладилась — плавно возвращаем. */
+    private fun adaptBitrate() {
+        val s = stream ?: return
+        if (state != State.LIVE || maxBitrate == 0) return
+        val congested = runCatching { s.getStreamClient().hasCongestion() }.getOrDefault(false)
+        val minBitrate = max(400_000, maxBitrate / 5)
+        if (congested) {
+            calmSeconds = 0
+            val next = max(minBitrate, (curBitrate * 0.75).toInt())
+            if (next != curBitrate) {
+                curBitrate = next
+                runCatching { s.setVideoBitrateOnFly(next) }
+            }
+        } else if (curBitrate < maxBitrate && ++calmSeconds >= 5) {
+            calmSeconds = 0
+            curBitrate = min(maxBitrate, (curBitrate * 1.15).toInt())
+            runCatching { s.setVideoBitrateOnFly(curBitrate) }
+        }
     }
 
     // ---------- Звук ----------
@@ -201,6 +341,7 @@ class StreamService : Service(), ConnectChecker {
 
     override fun onNewBitrate(bitrate: Long) {
         kbps = bitrate / 1000
+        main.post { adaptBitrate() }
     }
 
     override fun onDisconnect() {}
@@ -243,7 +384,9 @@ class StreamService : Service(), ConnectChecker {
             else -> "🎙"
         }
         val rate = if (kbps >= 1000) "%.1f Мб".format(kbps / 1000f) else "$kbps Кб"
-        b.text = "$title\n$mic $rate"
+        val lowered = if (curBitrate < maxBitrate) "↓" else ""
+        val lock = if (covered) "🔒 " else ""
+        b.text = "$title\n$lock$mic $rate$lowered"
         bubbleBg?.setColor(color)
     }
 
@@ -356,6 +499,7 @@ class StreamService : Service(), ConnectChecker {
 
     override fun onDestroy() {
         isRunning = false
+        instance = null
         main.removeCallbacksAndMessages(null)
         stream?.let {
             runCatching { if (it.isStreaming) it.stopStream() }

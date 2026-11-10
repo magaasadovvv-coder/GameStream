@@ -30,6 +30,10 @@ data class StreamConfig(
     val quality: Quality = Quality.P720_60,
     val vertical: Boolean = false,
     val audio: AudioMode = AudioMode.GAME_AND_MIC,
+    /** Авто-скрытие личного: закрывать экран заставкой вне игры и при уведомлениях. */
+    val privacy: Boolean = false,
+    /** Пакет игры, которую можно показывать зрителям. */
+    val gamePkg: String = "",
 ) {
     /** Адрес, куда отправляем поток. */
     val url: String
@@ -59,6 +63,8 @@ data class StreamConfig(
         .putExtra("fps", quality.fps)
         .putExtra("bitrate", bitrate)
         .putExtra("audio", effectiveAudio().name)
+        .putExtra("privacy", privacy)
+        .putExtra("game", gamePkg)
 
     fun save(ctx: Context) {
         prefs(ctx).edit()
@@ -70,6 +76,8 @@ data class StreamConfig(
             .putString("quality", quality.name)
             .putBoolean("vertical", vertical)
             .putString("audio", audio.name)
+            .putBoolean("privacy", privacy)
+            .putString("gamePkg", gamePkg)
             .apply()
     }
 
@@ -88,6 +96,8 @@ data class StreamConfig(
                 quality = runCatching { Quality.valueOf(p.getString("quality", null)!!) }.getOrDefault(d.quality),
                 vertical = p.getBoolean("vertical", false),
                 audio = runCatching { AudioMode.valueOf(p.getString("audio", null)!!) }.getOrDefault(d.audio),
+                privacy = p.getBoolean("privacy", false),
+                gamePkg = p.getString("gamePkg", "")!!,
             )
         }
     }
