@@ -190,6 +190,15 @@ class MainActivity : Activity() {
         }
         root.addView(privacyBox)
 
+        root.addView(Button(this).apply {
+            text = "⬇ Скачать последнюю версию"
+            isAllCaps = false
+            setOnClickListener {
+                startActivity(Intent(Intent.ACTION_VIEW,
+                    Uri.parse("https://github.com/magaasadovvv-coder/GameStream/releases/latest/download/GameStream.apk")))
+            }
+        }, spaced(16))
+
         // --- Кнопки ---
         overlayBtn = Button(this).apply {
             text = "Разрешить кнопку поверх игр"

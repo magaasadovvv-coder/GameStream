@@ -1,5 +1,6 @@
 package com.screentranslator
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -9,8 +10,11 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -23,6 +27,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.MotionEvent
@@ -30,6 +35,7 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -42,10 +48,15 @@ import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 /**
- * Фоновый сервис: захватывает экран, показывает плавающую кнопку «译» и слой с переводом.
- *  • тап по кнопке — перевести экран / убрать перевод
- *  • долгое нажатие — режим реального времени (перевод каждые ~2 сек)
- *  • кнопку можно перетаскивать
+ * Фоновый сервис: захватывает экран и сам, в реальном времени, показывает перевод поверх него.
+ *
+ * Чтобы перевод не мигал, экран не перечитывается по таймеру. Сервис дважды в секунду
+ * сравнивает кадры и действует по ситуации:
+ *  • ничего не изменилось — перевод просто остаётся на месте;
+ *  • появился новый текст — он допереводится, старый перевод не трогается;
+ *  • экран сменился целиком — старый перевод убирается, новый появляется, когда картинка успокоится.
+ *
+ * Кнопка «译»: тап — пауза/продолжить, долгое нажатие — закрыть переводчик, её можно перетаскивать.
  */
 class TranslatorService : Service() {
 
@@ -55,9 +66,18 @@ class TranslatorService : Service() {
         const val ACTION_STOP = "com.screentranslator.STOP"
         private const val CHANNEL_ID = "translator"
         private const val NOTIF_ID = 1
-        private const val AUTO_INTERVAL_MS = 2000L
+
+        private const val CYCLE_MS = 450L            // как часто сравниваем кадры
+        private const val SCENE_CHANGE = 0.25f       // доля изменившегося экрана = «другой экран»
+        private const val MIN_CHANGED_CELLS = 3      // меньше — считаем, что ничего не менялось
+        private const val ADD_INTERVAL_MS = 1200L    // не чаще дочитываем новый текст
+        private const val RECHECK_MS = 8000L         // при живой картинке — полная перепроверка
+        private const val THRESHOLD = 28             // порог разницы яркости клетки
+
         @Volatile var isRunning = false
     }
+
+    private class Diff(val changed: Int, val fraction: Float)
 
     private lateinit var windowManager: WindowManager
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -69,16 +89,16 @@ class TranslatorService : Service() {
     private var imageReader: ImageReader? = null
     private val frameLock = Any()
     private var lastImage: Image? = null
+    private var frameCount = 0L
     private var screenW = 0
     private var screenH = 0
     private var dpi = 0
 
     private var bubble: TextView? = null
-    private var bubbleParams: WindowManager.LayoutParams? = null
     private var overlay: OverlayView? = null
-    private var overlayShown = false
-    private var busy = false
     private var autoJob: Job? = null
+    private var errorShown = false
+    private val maskPaint = Paint().apply { color = Color.rgb(40, 40, 44) }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -108,6 +128,7 @@ class TranslatorService : Service() {
             }
             addOverlay()
             addBubble()
+            setActive(true)
         }
         return START_NOT_STICKY
     }
@@ -126,7 +147,7 @@ class TranslatorService : Service() {
         val notification = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setContentTitle("Переводчик работает")
-            .setContentText("Тап по «译» — перевод, долгое нажатие — авто-режим")
+            .setContentText("Тап по «译» — пауза, долгое нажатие — закрыть")
             .setOngoing(true)
             .addAction(Notification.Action.Builder(null, "Остановить", stopIntent).build())
             .build()
@@ -180,6 +201,7 @@ class TranslatorService : Service() {
             synchronized(frameLock) {
                 lastImage?.close()
                 lastImage = img
+                frameCount++
             }
         }, bgHandler)
         return reader
@@ -191,7 +213,7 @@ class TranslatorService : Service() {
         val (w, h) = realScreenSize()
         if (w == screenW && h == screenH || virtualDisplay == null) return
         screenW = w; screenH = h
-        hideTranslation()
+        overlay?.show(emptyList())
         val old = imageReader
         val reader = newReader(w, h)
         imageReader = reader
@@ -204,6 +226,7 @@ class TranslatorService : Service() {
         old?.close()
     }
 
+    /** Копия последнего кадра (в него можно рисовать). */
     private fun grabFrame(): Bitmap? = synchronized(frameLock) {
         val image = lastImage ?: return null
         val plane = image.planes[0]
@@ -213,61 +236,196 @@ class TranslatorService : Service() {
         plane.buffer.rewind()
         padded.copyPixelsFromBuffer(plane.buffer)
         if (rowPadding == 0) padded
-        else Bitmap.createBitmap(padded, 0, 0, image.width, image.height).also { padded.recycle() }
+        else Bitmap.createBitmap(padded, 0, 0, image.width, image.height)
+            .let { if (it.isMutable) it else it.copy(Bitmap.Config.ARGB_8888, true) }
+            .also { if (it !== padded) padded.recycle() }
     }
 
-    // ---------- Перевод ----------
+    private fun gridCols(w: Int, h: Int) = if (w >= h) 48 else 27
+    private fun gridRows(w: Int, h: Int) = (gridCols(w, h) * h / w).coerceAtLeast(1)
 
-    private suspend fun translateScreen() {
-        if (busy) return
-        busy = true
-        try {
-            // Прячем свои окна, чтобы они не попали в кадр, и ждём свежий кадр
-            overlay?.visibility = View.INVISIBLE
-            bubble?.visibility = View.INVISIBLE
-            delay(180)
-            val bitmap = withContext(Dispatchers.Default) { grabFrame() }
-            bubble?.visibility = View.VISIBLE
-            if (bitmap == null) {
-                toast("Кадр ещё не готов, попробуй снова")
-                return
+    /** «Отпечаток» кадра: яркость в узлах сетки. Считается прямо из буфера, без копирования кадра. */
+    private fun signature(): IntArray? = synchronized(frameLock) {
+        val image = lastImage ?: return null
+        val plane = image.planes[0]
+        val buf = plane.buffer
+        val w = image.width
+        val h = image.height
+        val cols = gridCols(w, h)
+        val rows = gridRows(w, h)
+        val out = IntArray(cols * rows)
+        val limit = buf.limit()
+        for (r in 0 until rows) {
+            val y = ((r + 0.5f) * h / rows).toInt().coerceIn(0, h - 1)
+            for (c in 0 until cols) {
+                val x = ((c + 0.5f) * w / cols).toInt().coerceIn(0, w - 1)
+                val i = y * plane.rowStride + x * plane.pixelStride
+                if (i + 2 >= limit) continue
+                val red = buf.get(i).toInt() and 0xff
+                val green = buf.get(i + 1).toInt() and 0xff
+                val blue = buf.get(i + 2).toInt() and 0xff
+                out[r * cols + c] = (red * 3 + green * 6 + blue) / 10
             }
-            val blocks = Engine.process(bitmap)
-            bitmap.recycle()
-            overlay?.show(blocks)
-            overlay?.visibility = View.VISIBLE
-            overlayShown = true
-            if (blocks.isEmpty() && autoJob == null) toast("Китайский текст не найден")
-        } catch (e: Exception) {
-            bubble?.visibility = View.VISIBLE
-            toast("Ошибка: ${e.message}")
-        } finally {
-            busy = false
+        }
+        out
+    }
+
+    /** Какие клетки сетки закрыты нашим переводом или кнопкой — их в сравнении не учитываем. */
+    private fun coverMask(size: Int, rects: List<Rect>): BooleanArray {
+        val cols = gridCols(screenW, screenH)
+        val rows = gridRows(screenW, screenH)
+        val mask = BooleanArray(size)
+        if (cols * rows != size) return mask
+        val cellW = screenW.toFloat() / cols
+        val cellH = screenH.toFloat() / rows
+        for (rect in rects) {
+            val c0 = ((rect.left / cellW) - 1).toInt().coerceIn(0, cols - 1)
+            val c1 = ((rect.right / cellW) + 1).toInt().coerceIn(0, cols - 1)
+            val r0 = ((rect.top / cellH) - 1).toInt().coerceIn(0, rows - 1)
+            val r1 = ((rect.bottom / cellH) + 1).toInt().coerceIn(0, rows - 1)
+            for (r in r0..r1) for (c in c0..c1) mask[r * cols + c] = true
+        }
+        return mask
+    }
+
+    private fun diff(a: IntArray, b: IntArray, maskA: BooleanArray?, maskB: BooleanArray): Diff {
+        var changed = 0
+        var total = 0
+        for (i in a.indices) {
+            if (maskB[i] || (maskA != null && maskA[i])) continue
+            total++
+            if (abs(a[i] - b[i]) > THRESHOLD) changed++
+        }
+        return Diff(changed, if (total == 0) 0f else changed.toFloat() / total)
+    }
+
+    private fun bubbleRect(): Rect? {
+        val b = bubble ?: return null
+        val loc = IntArray(2)
+        b.getLocationOnScreen(loc)
+        return Rect(loc[0], loc[1], loc[0] + b.width, loc[1] + b.height)
+    }
+
+    /** Закрашивает области, которые распознавать не нужно (нашу кнопку и уже показанный перевод). */
+    private fun mask(bitmap: Bitmap, rects: List<Rect>) {
+        if (rects.isEmpty()) return
+        val canvas = Canvas(bitmap)
+        for (r in rects) canvas.drawRect(r, maskPaint)
+    }
+
+    // ---------- Перевод в реальном времени ----------
+
+    private fun setActive(on: Boolean) {
+        autoJob?.cancel()
+        autoJob = null
+        overlay?.show(emptyList())
+        (bubble?.background as? GradientDrawable)?.setColor(
+            if (on) Color.argb(190, 40, 110, 230) else Color.argb(150, 90, 90, 100)
+        )
+        if (on) autoJob = scope.launch { autoLoop() }
+    }
+
+    private suspend fun autoLoop() {
+        var prev: IntArray? = null
+        var prevMask: BooleanArray? = null
+        var needFull = true
+        var unsettled = 0
+        var dirty = false
+        var quiet = 0
+        var lastFull = 0L
+        var lastAdd = 0L
+
+        while (scope.isActive) {
+            delay(CYCLE_MS)
+            try {
+                val ov = overlay ?: continue
+                val sig = withContext(Dispatchers.Default) { signature() } ?: continue
+                val maskNow = coverMask(sig.size, ov.coveredRects() + listOfNotNull(bubbleRect()))
+                val before = prev
+                val d = if (before != null && before.size == sig.size) diff(before, sig, prevMask, maskNow) else null
+                prev = sig
+                prevMask = maskNow
+
+                if (d == null) {
+                    needFull = true                       // первый кадр или поворот экрана
+                } else if (d.fraction > SCENE_CHANGE) {
+                    // Другой экран: старый перевод больше не к месту — убираем сразу
+                    ov.show(emptyList())
+                    needFull = true
+                    if (++unsettled <= 2) continue        // ждём, пока картинка успокоится (до ~1 с)
+                }
+
+                if (needFull) {
+                    translateAll(ov)
+                    needFull = false
+                    unsettled = 0
+                    dirty = false
+                    quiet = 0
+                    lastFull = SystemClock.elapsedRealtime()
+                    continue
+                }
+
+                val change = d ?: continue
+                val now = SystemClock.elapsedRealtime()
+                if (change.changed >= MIN_CHANGED_CELLS) {
+                    // Что-то поменялось рядом: дочитываем новый текст, показанный перевод не трогаем
+                    dirty = true
+                    quiet = 0
+                    if (now - lastAdd > ADD_INTERVAL_MS) {
+                        lastAdd = now
+                        translateNew(ov)
+                    }
+                    if (now - lastFull > RECHECK_MS) needFull = true
+                } else {
+                    // Экран замер — один раз перепроверяем, не устарел ли перевод
+                    quiet++
+                    if (dirty && quiet >= 2 && now - lastFull > 2500) needFull = true
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (!errorShown) {
+                    errorShown = true
+                    toast("Не удалось перевести: открой приложение и скачай языки")
+                }
+                delay(3000)
+            }
         }
     }
 
-    private fun hideTranslation() {
-        overlay?.show(emptyList())
-        overlayShown = false
+    /** Перевести весь экран. Если перевод уже показан — прячем его на долю секунды, чтобы прочитать текст под ним. */
+    private suspend fun translateAll(ov: OverlayView) {
+        val hide = !ov.isEmpty
+        if (hide) {
+            ov.visibility = View.INVISIBLE
+            awaitFreshFrames()
+        }
+        val bitmap = withContext(Dispatchers.Default) { grabFrame() }
+        if (hide) ov.visibility = View.VISIBLE
+        bitmap ?: return
+        mask(bitmap, listOfNotNull(bubbleRect()))
+        val blocks = Engine.process(bitmap)
+        bitmap.recycle()
+        ov.show(blocks)
+        errorShown = false
     }
 
-    private fun toggleAuto() {
-        val job = autoJob
-        if (job != null) {
-            job.cancel()
-            autoJob = null
-            setBubbleColor(false)
-            hideTranslation()
-            toast("Авто-режим выключен")
-        } else {
-            setBubbleColor(true)
-            toast("Авто-режим: перевод каждые ${AUTO_INTERVAL_MS / 1000} сек")
-            autoJob = scope.launch {
-                while (isActive) {
-                    translateScreen()
-                    delay(AUTO_INTERVAL_MS)
-                }
-            }
+    /** Перевести только текст вне уже показанного перевода — без мигания. */
+    private suspend fun translateNew(ov: OverlayView) {
+        val covered = ov.coveredRects()
+        val bitmap = withContext(Dispatchers.Default) { grabFrame() } ?: return
+        mask(bitmap, covered + listOfNotNull(bubbleRect()))
+        val blocks = Engine.process(bitmap, skip = covered)
+        bitmap.recycle()
+        ov.add(blocks)
+    }
+
+    /** Ждём пару свежих кадров после того, как спрятали перевод (обычно 30–60 мс). */
+    private suspend fun awaitFreshFrames() {
+        val start = synchronized(frameLock) { frameCount }
+        repeat(25) {
+            delay(10)
+            if (synchronized(frameLock) { frameCount } >= start + 2) return
         }
     }
 
@@ -298,18 +456,13 @@ class TranslatorService : Service() {
         overlay = view
     }
 
-    private fun setBubbleColor(auto: Boolean) {
-        (bubble?.background as? GradientDrawable)?.setColor(
-            if (auto) Color.argb(230, 220, 60, 60) else Color.argb(210, 40, 110, 230)
-        )
-    }
-
+    @SuppressLint("ClickableViewAccessibility")
     private fun addBubble() {
         val d = resources.displayMetrics.density
-        val size = (52 * d).toInt()
+        val size = (44 * d).toInt()
         val view = TextView(this).apply {
             text = "译"
-            textSize = 22f
+            textSize = 18f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
             background = GradientDrawable().apply { shape = GradientDrawable.OVAL }
@@ -319,16 +472,17 @@ class TranslatorService : Service() {
             y = (200 * d).toInt()
         }
         bubble = view
-        bubbleParams = params
-        setBubbleColor(false)
 
-        val longPressMs = 600L
         val handler = Handler(Looper.getMainLooper())
         var startX = 0; var startY = 0
         var touchX = 0f; var touchY = 0f
         var dragging = false
         var longPressed = false
-        val longPress = Runnable { longPressed = true; toggleAuto() }
+        val longPress = Runnable {
+            longPressed = true
+            toast("Переводчик закрыт")
+            stopSelf()
+        }
 
         view.setOnTouchListener { _, e ->
             when (e.action) {
@@ -336,7 +490,7 @@ class TranslatorService : Service() {
                     startX = params.x; startY = params.y
                     touchX = e.rawX; touchY = e.rawY
                     dragging = false; longPressed = false
-                    handler.postDelayed(longPress, longPressMs)
+                    handler.postDelayed(longPress, 900)
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = e.rawX - touchX
@@ -348,22 +502,21 @@ class TranslatorService : Service() {
                     if (dragging) {
                         params.x = startX + dx.toInt()
                         params.y = startY + dy.toInt()
-                        windowManager.updateViewLayout(view, params)
+                        runCatching { windowManager.updateViewLayout(view, params) }
                     }
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     handler.removeCallbacks(longPress)
-                    if (e.action == MotionEvent.ACTION_UP && !dragging && !longPressed) onBubbleTap()
+                    if (e.action == MotionEvent.ACTION_UP && !dragging && !longPressed) {
+                        val turnOn = autoJob == null
+                        setActive(turnOn)
+                        toast(if (turnOn) "Перевод включён" else "Перевод на паузе")
+                    }
                 }
             }
             true
         }
         windowManager.addView(view, params)
-    }
-
-    private fun onBubbleTap() {
-        if (autoJob != null) { toggleAuto(); return }
-        if (overlayShown) hideTranslation() else scope.launch { translateScreen() }
     }
 
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()

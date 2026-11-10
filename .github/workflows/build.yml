@@ -48,3 +48,23 @@ jobs:
         with:
           name: GameStream-PC
           path: dist/GameStreamPC/
+
+  # Публикует готовые файлы: постоянные ссылки на последнюю версию, без входа в аккаунт
+  release:
+    needs: [android, translator, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp out/GameStream-phone-apk/*.apk GameStream.apk
+          cp out/ScreenTranslator-apk/*.apk ScreenTranslator.apk
+          (cd out/GameStream-PC && zip -qr ../../GameStreamPC.zip .)
+          gh release create "v1.${{ github.run_number }}" GameStream.apk ScreenTranslator.apk GameStreamPC.zip \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+            --title "Версия 1.${{ github.run_number }}" --notes "Автоматическая сборка"

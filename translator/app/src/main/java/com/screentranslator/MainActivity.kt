@@ -46,8 +46,9 @@ class MainActivity : Activity() {
         root.addView(label("译 → RU  Переводчик экрана", 24f))
         root.addView(label(
             "Переводит китайский текст в любом приложении прямо поверх экрана. Работает офлайн.\n\n" +
-                "• Тап по кнопке «译» — перевести экран / убрать перевод\n" +
-                "• Долгое нажатие — авто-режим (красная кнопка)\n" +
+                "Перевод появляется сам и обновляется, когда меняется экран.\n\n" +
+                "• Тап по кнопке «译» — пауза / продолжить\n" +
+                "• Долгое нажатие — закрыть переводчик\n" +
                 "• Кнопку можно перетаскивать", 15f, Color.rgb(190, 190, 200)
         ))
         status = label("", 15f, Color.rgb(120, 200, 255))
@@ -58,6 +59,12 @@ class MainActivity : Activity() {
         })
         root.addView(button("2. Скачать языки (один раз, нужен интернет)") { downloadModels() })
         root.addView(button("▶ Запустить переводчик") { start() })
+        root.addView(button("⬇ Скачать последнюю версию") {
+            startActivity(Intent(Intent.ACTION_VIEW,
+                Uri.parse("https://github.com/magaasadovvv-coder/GameStream/releases/latest/download/ScreenTranslator.apk")))
+        })
+        root.addView(label("Версия " + (runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull() ?: "?"),
+            13f, Color.rgb(140, 140, 150)))
         root.addView(button("■ Остановить") {
             startService(Intent(this, TranslatorService::class.java).setAction(TranslatorService.ACTION_STOP))
             updateStatus()
