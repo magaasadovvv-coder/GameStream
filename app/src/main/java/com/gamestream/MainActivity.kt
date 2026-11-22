@@ -55,6 +55,10 @@ class MainActivity : Activity() {
     private lateinit var overlayBtn: Button
     private lateinit var startBtn: Button
     private lateinit var audioHint: TextView
+    private lateinit var qualityGroup: RadioGroup
+    private lateinit var updateBox: LinearLayout
+    private lateinit var updateBtn: Button
+    private var release: Updater.Release? = null
 
     private val d by lazy { resources.displayMetrics.density }
     private fun dp(v: Int) = (v * d).toInt()
@@ -77,6 +81,18 @@ class MainActivity : Activity() {
         })
         root.addView(hint("Стрим игр без водяных знаков — на YouTube или на ПК в OBS"))
         root.addView(hint("Версия " + (runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull() ?: "?")))
+
+        // Плашка «доступно обновление» — появляется сама, если на GitHub есть версия новее
+        updateBox = section().apply {
+            visibility = View.GONE
+            addView(label("🔔 Доступна новая версия"))
+            updateBtn = Button(this@MainActivity).apply {
+                isAllCaps = false
+                setOnClickListener { installUpdate() }
+            }
+            addView(updateBtn)
+        }
+        root.addView(updateBox)
 
         // Если в прошлый раз был сбой — показываем причину, чтобы её можно было отправить
         App.lastCrash(this)?.let { crash ->
@@ -106,7 +122,7 @@ class MainActivity : Activity() {
         // --- Куда стримить ---
         root.addView(header("Куда стримить"))
         root.addView(radioGroup(
-            listOf("📺 YouTube (прямо с телефона)", "💻 На ПК в OBS (по Wi‑Fi)"),
+            listOf("📺 YouTube (прямо с телефона)", "💻 На ПК в OBS (Wi‑Fi или USB)"),
             target.ordinal
         ) { target = Target.entries[it]; refresh() })
 
@@ -134,14 +150,22 @@ class MainActivity : Activity() {
                 addView(it)
             }
             addView(hint("Микрофон, вебка и оверлеи — в OBS на ПК. Поэтому для режима «На ПК» лучше выбрать звук «Только звук игры»."))
+            addView(label("По USB-кабелю"))
+            addView(hint("Меньше задержка и не зависишь от Wi‑Fi, а телефон заодно заряжается. Подключи телефон к ПК кабелем, включи «USB-модем» и нажми «Найти ПК автоматически»."))
+            addView(Button(this@MainActivity).apply {
+                text = "🔌 Включить USB-модем"
+                isAllCaps = false
+                setOnClickListener { openTetherSettings() }
+            })
         }
         root.addView(pcBlock)
 
         // --- Качество ---
         root.addView(header("Качество"))
-        root.addView(radioGroup(Quality.entries.map { it.title }, quality.ordinal) {
+        qualityGroup = radioGroup(Quality.entries.map { it.title }, quality.ordinal) {
             quality = Quality.entries[it]
-        })
+        }
+        root.addView(qualityGroup)
         root.addView(hint("Для YouTube с мобильного интернета начни с 720p. Для режима «На ПК» битрейт автоматически вдвое выше."))
 
         root.addView(header("Ориентация"))
@@ -190,14 +214,27 @@ class MainActivity : Activity() {
         }
         root.addView(privacyBox)
 
+        // --- Удобства ---
+        root.addView(header("Удобства"))
         root.addView(Button(this).apply {
-            text = "⬇ Скачать последнюю версию"
+            text = "🩺 Проверка перед эфиром"
             isAllCaps = false
-            setOnClickListener {
-                startActivity(Intent(Intent.ACTION_VIEW,
-                    Uri.parse("https://github.com/magaasadovvv-coder/GameStream/releases/latest/download/GameStream.apk")))
-            }
-        }, spaced(16))
+            setOnClickListener { runPreflight() }
+        })
+        if (Build.VERSION.SDK_INT >= 33) {
+            root.addView(Button(this).apply {
+                text = "⚡ Добавить плитку быстрого старта в шторку"
+                isAllCaps = false
+                setOnClickListener { addTile() }
+            })
+        }
+        root.addView(hint("Плитка «GameStream» в шторке запускает стрим одним тапом с последними настройками." +
+            (if (Build.VERSION.SDK_INT < 33) " Добавь её: опусти шторку → карандаш ✏ → перетащи плитку GameStream." else "")))
+        root.addView(Button(this).apply {
+            text = "🔄 Проверить обновления"
+            isAllCaps = false
+            setOnClickListener { checkUpdates(manual = true) }
+        })
 
         // --- Кнопки ---
         overlayBtn = Button(this).apply {
@@ -225,6 +262,7 @@ class MainActivity : Activity() {
             addView(root)
         })
         refresh()
+        checkUpdates(manual = false)
     }
 
     override fun onResume() {
@@ -267,15 +305,7 @@ class MainActivity : Activity() {
             return
         }
         val cfg = currentConfig()
-        if (cfg.target == Target.YOUTUBE && cfg.ytKey.isEmpty()) return toast("Вставь ключ трансляции YouTube")
-        if (cfg.target == Target.PC && cfg.pcIp.isEmpty()) return toast("Найди ПК или впиши его IP")
-        if (cfg.privacy) {
-            val usage = Access.hasUsageAccess(this)
-            if (usage && cfg.gamePkg.isEmpty()) return toast("Выбери игру для авто-скрытия")
-            if (!usage && !Access.hasNotificationAccess(this)) {
-                return toast("Для авто-скрытия включи хотя бы одно из двух разрешений в разделе «Приватность»")
-            }
-        }
+        cfg.problem(this)?.let { return toast(it) }
         cfg.save(this)
 
         val needed = mutableListOf<String>()
@@ -348,6 +378,98 @@ class MainActivity : Activity() {
             .show()
     }
 
+    // ---------- Обновления ----------
+
+    private fun checkUpdates(manual: Boolean) {
+        if (manual) toast("Проверяю…")
+        thread {
+            val r = runCatching { Updater.check(this) }
+            runOnUiThread {
+                val rel = r.getOrNull()
+                release = rel
+                if (rel != null) {
+                    updateBox.visibility = View.VISIBLE
+                    updateBtn.text = "⬇ Обновить до версии 1.${rel.version}"
+                    updateBtn.isEnabled = true
+                } else if (manual) {
+                    toast(if (r.isFailure) "Не удалось проверить — нет интернета?" else "У тебя последняя версия")
+                }
+            }
+        }
+    }
+
+    private fun installUpdate() {
+        val rel = release ?: return
+        if (StreamService.isRunning) return toast("Сначала заверши стрим")
+        if (!Updater.ensureInstallAllowed(this)) return
+        updateBtn.isEnabled = false
+        updateBtn.text = "Скачиваю… 0%"
+        Updater.downloadAndInstall(this, rel,
+            onProgress = { p -> runOnUiThread { updateBtn.text = if (p < 100) "Скачиваю… $p%" else "Устанавливаю…" } },
+            onError = { e -> runOnUiThread {
+                updateBtn.isEnabled = true
+                updateBtn.text = "⬇ Обновить до версии 1.${rel.version}"
+                toast("Не удалось скачать: $e")
+            } })
+    }
+
+    // ---------- Проверка перед эфиром ----------
+
+    private fun runPreflight() {
+        val cfg = currentConfig()
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("Проверка перед эфиром")
+            .setMessage("Проверяю сеть, ПК, заряд и нагрев…")
+            .setPositiveButton("OK", null)
+            .show()
+        thread {
+            val result = runCatching { Preflight.run(this, cfg) }
+            runOnUiThread {
+                if (isFinishing) return@runOnUiThread
+                dialog.dismiss()
+                val res = result.getOrNull()
+                if (res == null) return@runOnUiThread toast("Проверка не удалась: ${result.exceptionOrNull()?.message}")
+                val text = res.lines.joinToString("\n\n") { "${it.level.icon}  ${it.text}" } +
+                    "\n\nРекомендуемое качество: ${res.recommended.title}" +
+                    if (res.hasBlockers) "\n\nИсправь пункты с ✗ перед стримом." else ""
+                val b = android.app.AlertDialog.Builder(this)
+                    .setTitle(if (res.hasBlockers) "Есть проблемы" else "Можно стримить")
+                    .setMessage(text)
+                    .setNegativeButton("Закрыть", null)
+                if (res.recommended != quality) {
+                    b.setPositiveButton("Поставить ${res.recommended.title}") { _, _ ->
+                        (qualityGroup.getChildAt(res.recommended.ordinal) as? RadioButton)?.isChecked = true
+                        currentConfig().save(this)
+                    }
+                }
+                b.show()
+            }
+        }
+    }
+
+    // ---------- Плитка и USB ----------
+
+    private fun addTile() {
+        if (Build.VERSION.SDK_INT < 33) return
+        val sbm = getSystemService(android.app.StatusBarManager::class.java)
+        sbm.requestAddTileService(
+            android.content.ComponentName(this, StreamTileService::class.java),
+            "GameStream",
+            android.graphics.drawable.Icon.createWithResource(this, android.R.drawable.presence_video_online),
+            mainExecutor
+        ) { code ->
+            if (code == android.app.StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED) toast("Плитка уже есть в шторке")
+        }
+    }
+
+    private fun openTetherSettings() {
+        val direct = Intent().setClassName("com.android.settings", "com.android.settings.TetherSettings")
+        runCatching { startActivity(direct) }.onFailure {
+            runCatching { startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS)) }
+                .onFailure { toast("Открой Настройки → Сеть → Точка доступа и модем → USB-модем") }
+        }
+    }
+
     // ---------- Поиск ПК ----------
 
     private fun findPc() {
@@ -357,7 +479,7 @@ class MainActivity : Activity() {
             runOnUiThread {
                 if (pc != null) {
                     ipField.setText(pc.ip)
-                    findStatus.text = "✓ Найден: ${pc.name} (${pc.ip})"
+                    findStatus.text = "✓ Найден: ${pc.name} (${pc.ip})" + if (pc.usb) " — по USB-кабелю" else " — по Wi‑Fi"
                     pcPort = pc.port
                     currentConfig().save(this)
                 } else {

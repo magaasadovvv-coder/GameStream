@@ -8,8 +8,10 @@ import android.app.PendingIntent
 import android.app.Service
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.service.quicksettings.TileService
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -99,6 +101,9 @@ class StreamService : Service(), ConnectChecker {
     private var notifUntil = 0L
     private var lastEventTs = 0L
     private var covered = false
+    private var flashing = false
+    private var phoneLink: PhoneLink? = null
+    private var pcIp = ""
     private var coverBitmap: Bitmap? = null
 
     private var bubble: TextView? = null
@@ -111,6 +116,11 @@ class StreamService : Service(), ConnectChecker {
         windowManager = getSystemService(WindowManager::class.java)
         isRunning = true
         instance = this
+        refreshTile()
+    }
+
+    private fun refreshTile() {
+        runCatching { TileService.requestListeningState(this, ComponentName(this, StreamTileService::class.java)) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -126,6 +136,7 @@ class StreamService : Service(), ConnectChecker {
         toPc = intent.getStringExtra("target") == Target.PC.name
         privacy = intent.getBooleanExtra("privacy", false)
         gamePkg = intent.getStringExtra("game") ?: ""
+        pcIp = intent.getStringExtra("pcip") ?: ""
 
         try {
             startStreaming(intent)
@@ -184,6 +195,7 @@ class StreamService : Service(), ConnectChecker {
 
         addBubble()
         s.startStream(url)
+        if (toPc && pcIp.isNotEmpty()) phoneLink = PhoneLink(pcIp, ::flash)
         startPrivacy()
         tick()
     }
@@ -230,8 +242,28 @@ class StreamService : Service(), ConnectChecker {
         }
     }
 
+    /** По команде с ПК: на 0,6 с делаем картинку стрима белой, чтобы ПК измерил задержку. На экране телефона не видно. */
+    private fun flash() {
+        val s = stream ?: return
+        if (covered || flashing) return
+        flashing = true
+        runCatching {
+            val white = Bitmap.createBitmap(16, 9, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
+            val filter = ImageObjectFilterRender()
+            s.getGlInterface().setFilter(filter)
+            filter.setImage(white)
+            filter.setScale(100f, 100f)
+        }
+        main.postDelayed({
+            flashing = false
+            if (!covered) runCatching { stream?.getGlInterface()?.clearFilters() }
+            updateCover()
+        }, 600)
+    }
+
     private fun updateCover() {
         val s = stream ?: return
+        if (flashing) return
         val want = privacy && (awayFromGame || SystemClock.elapsedRealtime() < notifUntil)
         if (want == covered) return
         covered = want
@@ -322,6 +354,7 @@ class StreamService : Service(), ConnectChecker {
         main.post {
             if (liveSince == 0L) liveSince = SystemClock.elapsedRealtime()
             state = State.LIVE
+            phoneLink?.state = "live"
             render()
             toast(if (toPc) "Подключено к ПК" else "Вы в эфире!")
         }
@@ -500,6 +533,8 @@ class StreamService : Service(), ConnectChecker {
     override fun onDestroy() {
         isRunning = false
         instance = null
+        phoneLink?.stop()
+        phoneLink = null
         main.removeCallbacksAndMessages(null)
         stream?.let {
             runCatching { if (it.isStreaming) it.stopStream() }
@@ -510,6 +545,7 @@ class StreamService : Service(), ConnectChecker {
         bubble = null
         projection?.stop()
         projection = null
+        refreshTile()
         super.onDestroy()
     }
 }

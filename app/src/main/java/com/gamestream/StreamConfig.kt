@@ -64,7 +64,22 @@ data class StreamConfig(
         .putExtra("bitrate", bitrate)
         .putExtra("audio", effectiveAudio().name)
         .putExtra("privacy", privacy)
+        .putExtra("pcip", pcIp.trim())
         .putExtra("game", gamePkg)
+
+    /** Чего не хватает для запуска стрима (null — всё готово). */
+    fun problem(ctx: Context): String? {
+        if (target == Target.YOUTUBE && ytKey.isBlank()) return "Вставь ключ трансляции YouTube"
+        if (target == Target.PC && pcIp.isBlank()) return "Найди ПК или впиши его IP"
+        if (privacy) {
+            val usage = Access.hasUsageAccess(ctx)
+            if (usage && gamePkg.isEmpty()) return "Выбери игру для авто-скрытия"
+            if (!usage && !Access.hasNotificationAccess(ctx)) {
+                return "Для авто-скрытия включи хотя бы одно из двух разрешений в разделе «Приватность»"
+            }
+        }
+        return null
+    }
 
     fun save(ctx: Context) {
         prefs(ctx).edit()
