@@ -146,7 +146,9 @@ def add_phone_source(srt_url, password=""):
         "hw_decode": True,
         "restart_on_activate": False,
         "close_when_inactive": False,
-        "buffering_mb": 1,
+        # Без буфера: звук и картинка идут сразу, задержка не копится
+        "buffering_mb": 0,
+        "ffmpeg_options": "fflags=nobuffer flags=low_delay",
         "reconnect_delay_sec": 1,
     }
     obs = ObsClient(password=password)
