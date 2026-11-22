@@ -72,11 +72,8 @@ data class StreamConfig(
         if (target == Target.YOUTUBE && ytKey.isBlank()) return "Вставь ключ трансляции YouTube"
         if (target == Target.PC && pcIp.isBlank()) return "Найди ПК или впиши его IP"
         if (privacy) {
-            val usage = Access.hasUsageAccess(ctx)
-            if (usage && gamePkg.isEmpty()) return "Выбери игру для авто-скрытия"
-            if (!usage && !Access.hasNotificationAccess(ctx)) {
-                return "Для авто-скрытия включи хотя бы одно из двух разрешений в разделе «Приватность»"
-            }
+            if (!Access.hasUsageAccess(ctx)) return "Для авто-скрытия выдай разрешение в разделе «Приватность»"
+            if (gamePkg.isEmpty()) return "Выбери игру для авто-скрытия"
         }
         return null
     }

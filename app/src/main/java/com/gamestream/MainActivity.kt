@@ -44,7 +44,6 @@ class MainActivity : Activity() {
     private lateinit var privacyBox: LinearLayout
     private lateinit var gameBtn: Button
     private lateinit var usageBtn: Button
-    private lateinit var notifBtn: Button
 
     private lateinit var ytBlock: LinearLayout
     private lateinit var pcBlock: LinearLayout
@@ -193,7 +192,7 @@ class MainActivity : Activity() {
             isChecked = privacy
             setOnCheckedChangeListener { _, on -> privacy = on; refresh() }
         })
-        root.addView(hint("Зрители видят заставку «Скоро вернусь» вместо экрана, когда ты выходишь из игры или всплывает уведомление. Звук продолжает идти."))
+        root.addView(hint("Зрители видят заставку «Скоро вернусь» вместо экрана, когда ты выходишь из игры. Звук продолжает идти."))
         privacyBox = section().apply {
             gameBtn = Button(this@MainActivity).apply {
                 isAllCaps = false
@@ -205,12 +204,8 @@ class MainActivity : Activity() {
                 setOnClickListener { openSettings(Settings.ACTION_USAGE_ACCESS_SETTINGS) }
             }
             addView(usageBtn)
-            notifBtn = Button(this@MainActivity).apply {
-                isAllCaps = false
-                setOnClickListener { openSettings(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS) }
-            }
-            addView(notifBtn)
             addView(hint("В открывшемся списке найди GameStream и включи. Если переключатель серый: Настройки → Приложения → GameStream → ⋮ → «Разрешить ограниченные настройки»."))
+            addView(hint("Чтобы уведомления не всплывали на стриме, включай на телефоне режим «Не беспокоить»."))
         }
         root.addView(privacyBox)
 
@@ -279,8 +274,7 @@ class MainActivity : Activity() {
 
         privacyBox.visibility = if (privacy) View.VISIBLE else View.GONE
         gameBtn.text = if (gamePkg.isEmpty()) "🎮 Выбрать игру" else "🎮 Игра: ${appName(gamePkg)}"
-        usageBtn.text = (if (Access.hasUsageAccess(this)) "✓ " else "① ") + "Скрывать экран вне игры"
-        notifBtn.text = (if (Access.hasNotificationAccess(this)) "✓ " else "② ") + "Скрывать уведомления"
+        usageBtn.text = (if (Access.hasUsageAccess(this)) "✓ " else "① ") + "Разрешить: скрывать экран вне игры"
     }
 
     private fun currentConfig() = StreamConfig(

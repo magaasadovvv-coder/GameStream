@@ -65,7 +65,6 @@ class StreamService : Service(), ConnectChecker {
         private const val CHANNEL_ID = "stream"
         private const val NOTIF_ID = 7
         @Volatile var isRunning = false
-        /** Запущенный сервис — чтобы NotifWatcher мог сообщить об уведомлении. */
         @Volatile var instance: StreamService? = null
 
         private const val NOTIF_COVER_MS = 6000L
@@ -232,15 +231,6 @@ class StreamService : Service(), ConnectChecker {
         main.postDelayed(::pollForeground, FOREGROUND_POLL_MS)
     }
 
-    /** Вызывает NotifWatcher, когда поверх экрана всплывает уведомление. */
-    fun onPrivateNotification(fromPackage: String) {
-        main.post {
-            if (!privacy || stream == null || fromPackage == gamePkg) return@post
-            notifUntil = SystemClock.elapsedRealtime() + NOTIF_COVER_MS
-            updateCover()
-            main.postDelayed(::updateCover, NOTIF_COVER_MS + 100)
-        }
-    }
 
     /** По команде с ПК: на 0,6 с делаем картинку стрима белой, чтобы ПК измерил задержку. На экране телефона не видно. */
     private fun flash() {
