@@ -138,6 +138,24 @@ class ObsClient:
 SOURCE_NAME = "📱 Телефон (GameStream)"
 
 
+def find_phone_source(obs):
+    """Название источника, который принимает поток с телефона (по названию или по адресу srt://…:9000)."""
+    inputs = obs.request("GetInputList").get("inputs", [])
+    if any(i.get("inputName") == SOURCE_NAME for i in inputs):
+        return SOURCE_NAME
+    for i in inputs:
+        if "ffmpeg_source" not in (i.get("inputKind") or ""):
+            continue
+        try:
+            settings = obs.request("GetInputSettings", {"inputName": i["inputName"]}).get("inputSettings", {})
+        except ObsError:
+            continue
+        url = str(settings.get("input", ""))
+        if url.startswith("srt://") and ":9000" in url:
+            return i["inputName"]
+    return None
+
+
 def add_phone_source(srt_url, password=""):
     """Создаёт (или обновляет) в текущей сцене OBS источник, принимающий поток с телефона."""
     settings = {
@@ -155,10 +173,10 @@ def add_phone_source(srt_url, password=""):
     obs = ObsClient(password=password)
     try:
         obs.connect()
-        inputs = obs.request("GetInputList").get("inputs", [])
-        if any(i.get("inputName") == SOURCE_NAME for i in inputs):
-            obs.request("SetInputSettings", {"inputName": SOURCE_NAME, "inputSettings": settings})
-            return "Источник телефона уже был — настройки обновлены"
+        existing = find_phone_source(obs)
+        if existing:
+            obs.request("SetInputSettings", {"inputName": existing, "inputSettings": settings})
+            return f"Источник телефона «{existing}» уже есть — настройки обновлены"
         scene = obs.request("GetCurrentProgramScene")["currentProgramSceneName"]
         obs.request("CreateInput", {
             "sceneName": scene,
@@ -240,9 +258,9 @@ def _mic_names(obs):
     return sorted(names)
 
 
-def _luma(obs):
+def _luma(obs, name):
     shot = obs.request("GetSourceScreenshot", {
-        "sourceName": SOURCE_NAME, "imageFormat": "png", "imageWidth": 32, "imageHeight": 18,
+        "sourceName": name, "imageFormat": "png", "imageWidth": 32, "imageHeight": 18,
     })["imageData"]
     return png_luma(base64.b64decode(shot.split(",", 1)[1]))
 
@@ -256,7 +274,8 @@ def measure_and_sync(send_flash, password="", tries=3, log=lambda m: None):
     obs = ObsClient(password=password)
     try:
         obs.connect()
-        if not any(i.get("inputName") == SOURCE_NAME for i in obs.request("GetInputList").get("inputs", [])):
+        source = find_phone_source(obs)
+        if not source:
             raise ObsError("В OBS нет источника телефона — сначала нажми «Добавить телефон в OBS»")
         mics = _mic_names(obs)
         if not mics:
@@ -265,7 +284,7 @@ def measure_and_sync(send_flash, password="", tries=3, log=lambda m: None):
         results = []
         for attempt in range(tries):
             log(f"Замер {attempt + 1} из {tries}…")
-            base = sum(_luma(obs) for _ in range(3)) / 3
+            base = sum(_luma(obs, source) for _ in range(3)) / 3
             if base > 200:
                 raise ObsError("Картинка слишком светлая для замера — открой в игре тёмный экран")
             t0 = time.perf_counter()
@@ -273,7 +292,7 @@ def measure_and_sync(send_flash, password="", tries=3, log=lambda m: None):
             found = None
             while time.perf_counter() - t0 < 8:
                 t1 = time.perf_counter()
-                lum = _luma(obs)
+                lum = _luma(obs, source)
                 t2 = time.perf_counter()
                 if lum > 215 and lum > base + 60:
                     # Кадр сделан где-то во время запроса — берём середину
