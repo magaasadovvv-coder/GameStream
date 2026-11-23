@@ -1,1 +1,5 @@
 *.pem
+__pycache__/
+.gradle/
+build/
+dist/
