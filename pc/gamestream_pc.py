@@ -19,6 +19,11 @@ from tkinter import ttk
 
 from obs_ws import ObsError, add_phone_source, measure_and_sync, obs_running
 
+try:
+    import invites
+except ImportError:  # без библиотеки cryptography окно ключей просто не откроется
+    invites = None
+
 DISCOVERY_PORT = 47800   # ПК → телефон: «я здесь»
 COMMAND_PORT = 47801     # ПК → телефон: команды (вспышка для замера)
 PHONE_PORT = 47802       # телефон → ПК: «я стримлю»
@@ -44,8 +49,12 @@ def settings_path():
     return os.path.join(folder, "settings.json")
 
 
+def settings_folder():
+    return os.path.dirname(settings_path())
+
+
 def load_settings():
-    defaults = {"password": "", "autostart": False, "open_obs": True, "auto_sync": True}
+    defaults = {"password": "", "autostart": False, "open_obs": True, "auto_sync": True, "invites": []}
     try:
         with open(settings_path(), encoding="utf-8") as f:
             defaults.update(json.load(f))
@@ -290,6 +299,8 @@ class App:
         self.status = tk.Label(root, text="", fg=DIM, bg=BG, wraplength=490, justify="left", font=("Segoe UI", 10))
         self.status.pack(anchor="w", pady=(6, 0), **pad)
 
+        self.button(root, "👥 Ключи для друзей", self.open_invites).pack(fill="x", pady=(10, 0), ipady=4, **pad)
+
         # Автоматизация
         tk.Label(root, text="Автоматически", fg=FG, bg=BG, font=("Segoe UI", 13, "bold")).pack(anchor="w", pady=(14, 2), **pad)
         self.var_autostart = self.check("Запускать вместе с Windows (свёрнутым)", "autostart", self.on_autostart)
@@ -446,11 +457,144 @@ class App:
 
         self.background(work, lambda msg, err: self.say(err or ("OBS готов. " + msg), BAD if err else OK))
 
+    # --- ключи для друзей ---
+
+    def open_invites(self):
+        if invites is None:
+            self.say("Окно ключей недоступно в этой версии программы", BAD)
+            return
+        InvitesWindow(self)
+
     def on_close(self):
         self.save()
         self.stop_event.set()
         self.phone.stop()
         self.root.destroy()
+
+
+class InvitesWindow:
+    """Создание ключей, по которым друзья активируют GameStream на своих телефонах."""
+
+    DURATIONS = [("Навсегда", 0), ("30 дней", 30), ("7 дней", 7), ("1 год", 365)]
+
+    def __init__(self, app):
+        from tkinter import filedialog
+        self.app = app
+        self.filedialog = filedialog
+        self.key_file = invites.owner_key_path(settings_folder())
+
+        win = tk.Toplevel(app.root)
+        self.win = win
+        win.title("Ключи для друзей")
+        win.configure(bg=BG)
+        win.geometry("520x640")
+        pad = {"padx": 18}
+
+        tk.Label(win, text="👥 Ключи для друзей", fg=FG, bg=BG, font=("Segoe UI", 15, "bold")).pack(anchor="w", pady=(16, 2), **pad)
+        tk.Label(win, justify="left", wraplength=480, fg=DIM, bg=BG, font=("Segoe UI", 9), text=(
+            "Друг ставит GameStream и видит «Код этого телефона». Он присылает код тебе, ты создаёшь "
+            "ключ и отправляешь обратно. Ключ работает только на его телефоне — переслать его другим не выйдет."
+        )).pack(anchor="w", **pad)
+
+        self.owner_label = tk.Label(win, text="", bg=BG, font=("Segoe UI", 10, "bold"), wraplength=480, justify="left")
+        self.owner_label.pack(anchor="w", pady=(12, 0), **pad)
+        self.load_btn = tk.Button(win, text="📂 Загрузить ключ владельца (GameStream-owner-key.pem)",
+                                  command=self.load_owner, relief="flat")
+        self.load_btn.pack(fill="x", pady=(4, 0), **pad)
+
+        form = tk.Frame(win, bg=BG)
+        form.pack(fill="x", pady=(14, 0), **pad)
+        tk.Label(form, text="Код телефона друга:", fg=FG, bg=BG, font=("Segoe UI", 10)).grid(row=0, column=0, sticky="w")
+        self.device = tk.Entry(form, font=("Consolas", 11))
+        self.device.grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=2)
+        tk.Label(form, text="Кому (для себя):", fg=FG, bg=BG, font=("Segoe UI", 10)).grid(row=1, column=0, sticky="w")
+        self.name = tk.Entry(form, font=("Segoe UI", 10))
+        self.name.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=2)
+        tk.Label(form, text="Срок:", fg=FG, bg=BG, font=("Segoe UI", 10)).grid(row=2, column=0, sticky="w")
+        self.duration = ttk.Combobox(form, state="readonly", values=[d[0] for d in self.DURATIONS])
+        self.duration.current(0)
+        self.duration.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=2)
+        form.columnconfigure(1, weight=1)
+
+        self.app.button(win, "🔑 Создать ключ", self.create).pack(fill="x", pady=(10, 0), ipady=5, **pad)
+        self.result = tk.Text(win, height=3, font=("Consolas", 9), wrap="char")
+        self.result.pack(fill="x", pady=(8, 0), **pad)
+        tk.Button(win, text="📋 Скопировать ключ", command=self.copy_key, relief="flat").pack(fill="x", pady=(4, 0), **pad)
+        self.status = tk.Label(win, text="", fg=DIM, bg=BG, font=("Segoe UI", 9), wraplength=480, justify="left")
+        self.status.pack(anchor="w", pady=(4, 0), **pad)
+
+        tk.Label(win, text="Выданные ключи", fg=FG, bg=BG, font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(12, 2), **pad)
+        self.history = tk.Listbox(win, height=8, font=("Segoe UI", 9))
+        self.history.pack(fill="both", expand=True, pady=(0, 16), **pad)
+
+        self.refresh()
+
+    def owner_key(self):
+        try:
+            with open(self.key_file, "rb") as f:
+                return invites.load_owner_key(f.read())
+        except (OSError, invites.InviteError):
+            return None
+
+    def refresh(self):
+        if self.owner_key():
+            self.owner_label.configure(text="✓ Ключ владельца загружен — можно создавать ключи", fg=OK)
+            self.load_btn.configure(text="📂 Заменить ключ владельца")
+        else:
+            self.owner_label.configure(text="Сначала загрузи файл GameStream-owner-key.pem — он есть только у тебя", fg=BAD)
+        self.history.delete(0, "end")
+        for item in reversed(self.app.settings.get("invites", [])):
+            self.history.insert("end", f"{item.get('date', '')}  {item.get('name') or 'без имени'}  —  "
+                                       f"{item.get('device', '')}  ({item.get('duration', '')})")
+
+    def load_owner(self):
+        path = self.filedialog.askopenfilename(parent=self.win, title="Ключ владельца",
+                                               filetypes=[("Ключ GameStream", "*.pem"), ("Все файлы", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+            invites.load_owner_key(data)
+            with open(self.key_file, "wb") as f:
+                f.write(data)
+            self.say("Ключ владельца сохранён в настройках программы", OK)
+        except (OSError, invites.InviteError) as e:
+            self.say(str(e), BAD)
+        self.refresh()
+
+    def create(self):
+        key = self.owner_key()
+        if not key:
+            self.say("Сначала загрузи ключ владельца", BAD)
+            return
+        label, days = self.DURATIONS[self.duration.current()]
+        try:
+            invite = invites.make_invite(key, self.device.get(), days)
+        except invites.InviteError as e:
+            self.say(str(e), BAD)
+            return
+        self.result.delete("1.0", "end")
+        self.result.insert("1.0", invite)
+        device = self.device.get().strip().upper()
+        self.app.settings.setdefault("invites", []).append({
+            "name": self.name.get().strip(), "device": device, "duration": label,
+            "date": time.strftime("%d.%m.%Y"),
+        })
+        self.app.save()
+        self.copy_key()
+        self.refresh()
+
+    def copy_key(self):
+        text = self.result.get("1.0", "end").strip()
+        if not text:
+            return
+        self.win.clipboard_clear()
+        self.win.clipboard_append(text)
+        self.say("✓ Ключ скопирован — отправь его другу", OK)
+
+    def say(self, text, color=DIM):
+        self.status.configure(text=text, fg=color)
 
 
 if __name__ == "__main__":

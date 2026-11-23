@@ -149,6 +149,10 @@ class StreamService : Service(), ConnectChecker {
     private fun startStreaming(intent: Intent) {
         // На Android 14+ foreground-сервис обязан стартовать ДО получения MediaProjection
         startInForeground()
+        if (!License.isUnlocked(this)) {
+            fail("Приложение не активировано")
+            return
+        }
 
         val code = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
         val data: Intent? = if (Build.VERSION.SDK_INT >= 33)

@@ -24,7 +24,8 @@ class QuickStartActivity : Activity() {
             return
         }
         val cfg = StreamConfig.load(this)
-        val problem = cfg.problem(this)
+        val problem = (if (!License.isUnlocked(this)) "Сначала активируй приложение ключом" else null)
+            ?: cfg.problem(this)
             ?: if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
                 "Первый запуск сделай из приложения — нужно выдать разрешения" else null
         if (problem != null) {

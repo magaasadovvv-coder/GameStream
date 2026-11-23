@@ -64,6 +64,10 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!License.isUnlocked(this)) {
+            showLockScreen()
+            return
+        }
         val cfg = StreamConfig.load(this)
         target = cfg.target; quality = cfg.quality; vertical = cfg.vertical; audio = cfg.audio; pcPort = cfg.pcPort
         privacy = cfg.privacy; gamePkg = cfg.gamePkg
@@ -262,6 +266,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (!::startBtn.isInitialized) return
         refresh()
     }
 
@@ -370,6 +375,82 @@ class MainActivity : Activity() {
                 refresh()
             }
             .show()
+    }
+
+    // ---------- Доступ по приглашению ----------
+
+    private fun showLockScreen() {
+        val code = License.deviceCode(this)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(48), dp(22), dp(28))
+        }
+        root.addView(TextView(this).apply {
+            text = "● GameStream"
+            textSize = 26f
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(accent)
+        })
+        root.addView(header("🔒 Приложение по приглашению"))
+        root.addView(hint("Чтобы пользоваться GameStream, нужен ключ от владельца. Отправь ему код этого телефона — он пришлёт ключ."))
+        root.addView(label("Код этого телефона"))
+        root.addView(TextView(this).apply {
+            text = code
+            textSize = 22f
+            setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+            setTextColor(textMain)
+            setTextIsSelectable(true)
+            setPadding(0, dp(6), 0, dp(6))
+        })
+        root.addView(Button(this).apply {
+            text = "📋 Скопировать код"
+            isAllCaps = false
+            setOnClickListener { copy(code); toast("Код скопирован — отправь его владельцу") }
+        })
+        root.addView(label("Ключ от владельца"))
+        val keyField = EditText(this).apply {
+            setTextColor(textMain)
+            setHintTextColor(textDim)
+            hint = "GS1-…"
+            minLines = 2
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        }
+        root.addView(keyField)
+        root.addView(Button(this).apply {
+            text = "📥 Вставить из буфера"
+            isAllCaps = false
+            setOnClickListener {
+                val cm = getSystemService(android.content.ClipboardManager::class.java)
+                cm.primaryClip?.getItemAt(0)?.coerceToText(this@MainActivity)?.let { keyField.setText(it) }
+            }
+        })
+        root.addView(Button(this).apply {
+            text = "🔓 Активировать"
+            textSize = 17f
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            background = GradientDrawable().apply { setColor(accent); cornerRadius = dp(12).toFloat() }
+            setOnClickListener {
+                val key = keyField.text.toString()
+                when (val r = License.check(this@MainActivity, key)) {
+                    is License.Check.Ok -> {
+                        License.save(this@MainActivity, key)
+                        toast("Готово! Добро пожаловать")
+                        recreate()
+                    }
+                    is License.Check.Bad -> toast(r.reason)
+                }
+            }
+        }, spaced(12).apply { height = dp(54) })
+        setContentView(ScrollView(this).apply {
+            setBackgroundColor(Color.rgb(16, 16, 22))
+            addView(root)
+        })
+    }
+
+    private fun copy(text: String) {
+        val cm = getSystemService(android.content.ClipboardManager::class.java)
+        cm.setPrimaryClip(android.content.ClipData.newPlainText("GameStream", text))
     }
 
     // ---------- Обновления ----------
