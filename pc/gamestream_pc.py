@@ -19,6 +19,8 @@ from tkinter import ttk
 
 from obs_ws import ObsError, add_phone_source, measure_and_sync, obs_running
 
+import updater
+
 try:
     import invites
 except ImportError:  # без библиотеки cryptography окно ключей просто не откроется
@@ -259,8 +261,15 @@ class App:
 
         pad = {"padx": 18}
         tk.Label(root, text="● GameStream PC", fg=ACCENT, bg=BG, font=("Segoe UI", 20, "bold")).pack(anchor="w", pady=(16, 0), **pad)
-        tk.Label(root, text="Картинка и звук игры — с телефона, всё остальное — в OBS на ПК",
+        tk.Label(root, text="Картинка и звук игры — с телефона, всё остальное — в OBS на ПК"
+                 + (f"   ·   версия 1.{updater.VERSION}" if updater.VERSION else ""),
                  fg=DIM, bg=BG, font=("Segoe UI", 10)).pack(anchor="w", **pad)
+
+        # Кнопка обновления — появляется сама, если на GitHub есть версия новее
+        self.update_btn = tk.Button(root, text="", command=self.on_update, bg="#2e7d32", fg="white",
+                                    activebackground="#1b5e20", activeforeground="white",
+                                    relief="flat", font=("Segoe UI", 10, "bold"), cursor="hand2")
+        self.update_info = None
 
         # Статус
         card = tk.Frame(root, bg=CARD)
@@ -328,6 +337,8 @@ class App:
         )).pack(anchor="w", pady=(12, 0), **pad)
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        if updater.can_update():
+            root.after(1500, self.check_updates)
         if minimized:
             root.after(100, root.iconify)
 
@@ -369,7 +380,7 @@ class App:
         def run():
             try:
                 result, error = work(), None
-            except ObsError as e:
+            except (ObsError, updater.UpdateError) as e:
                 result, error = None, str(e)
             except Exception as e:  # noqa: BLE001 — показать любую ошибку пользователю
                 result, error = None, f"Ошибка: {e}"
@@ -456,6 +467,37 @@ class App:
             raise ObsError("OBS открылся, но WebSocket не отвечает — включи его в Сервис → Настройки сервера WebSocket")
 
         self.background(work, lambda msg, err: self.say(err or ("OBS готов. " + msg), BAD if err else OK))
+
+    # --- обновления ---
+
+    def check_updates(self):
+        def done(info, err):
+            if info:
+                self.update_info = info
+                self.update_btn.configure(text=f"🔔 Доступна версия 1.{info[0]} — обновить", state="normal")
+                self.update_btn.pack(fill="x", padx=18, pady=(8, 0), ipady=4,
+                                     after=self.root.winfo_children()[1])
+        self.background(updater.check, done)
+
+    def on_update(self):
+        if not self.update_info:
+            return
+        self.save()
+        self.update_btn.configure(state="disabled", text="Скачиваю… 0%")
+
+        def progress(p):
+            self.root.after(0, lambda: self.update_btn.configure(text=f"Скачиваю… {p}%"))
+
+        def done(script, err):
+            if err:
+                self.update_btn.configure(state="normal", text=f"🔔 Доступна версия 1.{self.update_info[0]} — обновить")
+                self.say("Обновление не скачалось: " + err, BAD)
+                return
+            self.update_btn.configure(text="Устанавливаю… программа перезапустится")
+            updater.run_script(script)
+            self.root.after(300, self.on_close)
+
+        self.background(lambda: updater.download_and_prepare(self.update_info[1], progress), done)
 
     # --- ключи для друзей ---
 

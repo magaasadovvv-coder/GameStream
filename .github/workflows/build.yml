@@ -42,6 +42,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pyinstaller cryptography
+      - run: echo "VERSION = ${{ github.run_number }}" > pc/version.py
+        shell: bash
       # Папка вместо одного exe: такие сборки антивирусы не путают с вирусами
       - run: pyinstaller --onedir --windowed --noupx --name GameStreamPC pc/gamestream_pc.py
       - uses: actions/upload-artifact@v4
