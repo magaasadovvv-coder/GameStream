@@ -69,6 +69,13 @@ class StreamService : Service(), ConnectChecker {
 
         private const val NOTIF_COVER_MS = 6000L
         private const val FOREGROUND_POLL_MS = 400L
+        /** Игровые панели поверх игры — это не «выход из игры». */
+        private val IGNORED_OVERLAYS = setOf(
+            "com.asus.gamewidget", "com.asus.gamecenter", "com.asus.gamelauncher",
+            "com.samsung.android.game.gametools", "com.samsung.android.game.gamehome",
+            "com.miui.securitycenter", "com.coloros.gamespaceui", "com.oplus.games",
+            "com.android.systemui",
+        )
     }
 
     private enum class State { CONNECTING, LIVE, RECONNECTING }
@@ -97,10 +104,14 @@ class StreamService : Service(), ConnectChecker {
     private var gamePkg = ""
     private var trackGame = false
     private var awayFromGame = false
+    private var rawAway = false
+    private var awaySince = 0L
     private var notifUntil = 0L
     private var lastEventTs = 0L
     private var covered = false
     private var flashing = false
+    private val flashTimes = ArrayDeque<Long>()
+    private var flashBlockedUntil = 0L
     private var phoneLink: PhoneLink? = null
     private var pcIp = ""
     private var coverBitmap: Bitmap? = null
@@ -211,6 +222,8 @@ class StreamService : Service(), ConnectChecker {
         trackGame = gamePkg.isNotEmpty() && Access.hasUsageAccess(this)
         if (trackGame) {
             awayFromGame = true          // закрыто, пока не откроется игра
+            rawAway = true
+            awaySince = SystemClock.elapsedRealtime() - 1500
             lastEventTs = System.currentTimeMillis()
             pollForeground()
         }
@@ -227,9 +240,19 @@ class StreamService : Service(), ConnectChecker {
                 events.getNextEvent(e)
                 if (e.timeStamp > lastEventTs && e.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
                     lastEventTs = e.timeStamp
-                    awayFromGame = e.packageName != gamePkg
+                    rawAway = e.packageName != gamePkg && e.packageName !in IGNORED_OVERLAYS
                 }
             }
+        }
+        // Закрываем экран, только если ушёл из игры дольше чем на 1,5 с:
+        // игровые панели (Game Genie, Game Space и т. п.) мелькают на миг и не должны мигать заставкой
+        val now = SystemClock.elapsedRealtime()
+        if (rawAway) {
+            if (awaySince == 0L) awaySince = now
+            awayFromGame = now - awaySince >= 1500
+        } else {
+            awaySince = 0L
+            awayFromGame = false
         }
         updateCover()
         main.postDelayed(::pollForeground, FOREGROUND_POLL_MS)
@@ -240,6 +263,15 @@ class StreamService : Service(), ConnectChecker {
     private fun flash() {
         val s = stream ?: return
         if (covered || flashing) return
+        // Защита: замер — это 3 вспышки. Если команды идут чаще, что-то не так — не мигаем зрителям
+        val now = SystemClock.elapsedRealtime()
+        if (now < flashBlockedUntil) return
+        while (flashTimes.isNotEmpty() && now - flashTimes.first() > 20_000) flashTimes.removeFirst()
+        if (flashTimes.size >= 3) {
+            flashBlockedUntil = now + 60_000
+            return
+        }
+        flashTimes.addLast(now)
         flashing = true
         runCatching {
             val white = Bitmap.createBitmap(16, 9, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }

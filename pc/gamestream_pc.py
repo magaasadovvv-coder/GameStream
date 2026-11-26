@@ -413,6 +413,10 @@ class App:
             if not auto:
                 self.say("Сначала начни стрим на телефоне (режим «На ПК»)", BAD)
             return
+        if auto:
+            if self.synced_this_session:
+                return
+            self.synced_this_session = True   # один раз за стрим, даже если замер не удался
         self.save()
         self.syncing = True
         self.sync_btn.configure(state="disabled")
@@ -439,7 +443,6 @@ class App:
         if event == "error":
             self.say(info, BAD)
         elif event == "start":
-            self.synced_this_session = False
             self.phone_label.configure(text=f"📱 Телефон {info}: подключается…", fg="#e6a23c")
             if self.settings.get("open_obs") and not obs_running():
                 err = launch_obs()
@@ -452,6 +455,7 @@ class App:
                 # Даём картинке устояться, потом меряем
                 self.root.after(5000, lambda: self.on_sync(auto=True))
         elif event == "stop":
+            self.synced_this_session = False
             self.phone_label.configure(text="📱 Телефон: ждёт начала стрима", fg=DIM)
 
     def prepare_obs_after_launch(self):
